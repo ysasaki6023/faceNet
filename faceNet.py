@@ -1,51 +1,143 @@
 # -*- coding: utf-8 -*-
-import os,sys,shutil,argparse,cv2
+import os,sys,shutil,argparse,cv2,glob,csv,random
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 import inception_v4
-#import inception_resnet_v2
 
 #########################################################
 class BatchGenerator:
-    def __init__(self):
-        from tensorflow.examples.tutorials.mnist import input_data
-        mnist = input_data.read_data_sets("MNIST_data/", one_hot=False)
-        self.image = mnist.train.images
-        self.label = mnist.train.labels
+    # assumes name/filename.jpg
+    def __init__(self,zdim,imageShape=[224,224,3]):
+        self.imageShape = imageShape
+        self.zdim = zdim
 
-        self.image = np.reshape(self.image, [len(self.image), 28, 28])
+    def loadAndSaveDir(self,path,outFile="class.csv",trainFrac=0.9):
+        self.data = {}
+        count_keys = 0
+        count_file = 0
+        for f in glob.glob(os.path.join(path,"*/*.jpg")):
+            #print f
+            fullPath  = f
+            className = f.split("/")[-2]
+            if not className in self.data:
+                self.data[className] = []
+                count_keys += 1
+            self.data[className].append(fullPath)
+            count_file += 1
 
-    def getOne(self):
-        idx = np.random.randint(0,len(self.image)-1)
-        x,t = self.image[idx],self.label[idx]
-        if color:
-            x = np.expand_dims(x,axis=2)
-            x = np.tile(x,(1,3))
-        return x,t
+        print "found %d files, %d unique classes"%(count_file, count_keys)
 
-    def getBatch(self,nBatch,color=True):
-        idx = np.random.randint(0,len(self.image)-1,nBatch)
-        x,t = self.image[idx],self.label[idx]
-        if color:
-            x = np.expand_dims(x,axis=3)
-            x = np.tile(x,(1,1,3))
-        return x,t
+        self.keys_train = random.sample(self.data.keys(),int(len(self.data.keys())*trainFrac))
+        self.keys_test  = list( set(self.data.keys()) - set(self.keys_train) )
+
+        with open(outFile,"w") as ofile:
+            w = csv.writer(ofile,lineterminator="\n")
+            for cls in self.keys_train:
+                w.writerow([cls,"train"])
+            for cls in self.keys_test:
+                w.writerow([cls,"test"])
+
+        self.keys = {}
+        self.keys["train"] = self.keys_train
+        self.keys["test"]  = self.keys_test
+
+        def makeArray(tgtDict):
+            clsIndex = []
+            imgPath  = []
+            cls_index = -1
+            mycount = 0
+            for cls in tgtDict:
+                cls_index += 1
+                for f in self.data[cls]:
+                    mycount += 1
+                    clsIndex.append(cls_index)
+                    imgPath.append (f)
+            clsIndex = np.array(clsIndex)
+            imgPath  = np.array(imgPath)
+            tempVec  = np.zeros([mycount,self.zdim],dtype=np.float32)
+
+            return clsIndex,imgPath,tempVec
+
+        self.clsIndex,self.imgPath,self.tempVec = {},{},{}
+        self.clsIndex["train"], self.imgPath["train"], self.tempVec["train"] = makeArray(self.keys_train)
+        self.clsIndex["test"] , self.imgPath["test"] , self.tempVec["test"]  = makeArray(self.keys_test )
+
+        return
+
+    def setVec(self,v1,v2):
+        self.tempVec[self.prevMode][self.prevIndex[:,0]] = v1
+        self.tempVec[self.prevMode][self.prevIndex[:,1]] = v2
+        return
+
+    def getBatch(self,nBatch,alpha,mode="train",nOneTry=20):
+        def oneTry():
+            idx1 = np.random.randint(0,self.tempVec[mode].shape[0]-1,nOneTry)
+            idx2 = np.random.randint(0,self.tempVec[mode].shape[0]-1,nOneTry)
+            x1   = self.tempVec[mode][idx1]
+            x2   = self.tempVec[mode][idx2]
+            # 同じクラスになっているものはベクトルの長さを0としてしまう→後でalphaより小さいか否かを確認する際に必ず選定されることになる
+            same = np.equal(self.clsIndex[mode][idx1],self.clsIndex[mode][idx2])
+            x1[same,:] = 0.
+            x2[same,:] = 0.
+            # ベクトル間の距離がalpha以下ならば、それが選定される
+            x1 = np.repeat(x1,nOneTry,axis=0)
+            x2 = np.tile  (x2,(nOneTry,1))
+            dist = np.linalg.norm(x1-x2,axis=1)
+            good = np.where(dist<alpha)
+            i1 = np.divide(good,nOneTry)
+            i2 = good - i1*nOneTry
+            return idx1[i1][0],idx2[i2][0]
+
+        # 最低nBatch個の組を作成 
+        self.prevIndex = idx = np.zeros([nBatch,2],np.int32)
+        self.prevMode  = mode
+        cnt = 0
+        while True:
+            idList1,idList2 = oneTry()
+            #for k in range(res[0].shape[0]):
+            for id1,id2 in zip(idList1,idList2):
+                idx[cnt,0] = id1
+                idx[cnt,1] = id2
+                cnt += 1
+                if cnt == nBatch: break
+            if cnt == nBatch: break
+
+        # nBatch個に対し、ファイルの読み込みを実施
+        # ToDo: LFWデータセットは縦横同じ長さなので問題ないが、今後他のデータセットへ拡張する際は、縦横比を崩さないよう工夫をすること
+        def loadImg(url):
+            img = cv2.imread(url)
+            img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img,(self.imageShape[0],self.imageShape[1]),cv2.INTER_CUBIC)
+            return img
+
+        imgList1 = np.zeros([nBatch, self.imageShape[0], self.imageShape[1], self.imageShape[2]], dtype=np.float32)
+        imgList2 = np.zeros([nBatch, self.imageShape[0], self.imageShape[1], self.imageShape[2]], dtype=np.float32)
+        clsList1 = np.zeros([nBatch], dtype=np.int32)
+        clsList2 = np.zeros([nBatch], dtype=np.int32)
+        for i in range(nBatch):
+            imgList1[i] = loadImg(self.imgPath[mode][idx[i,0]])
+            imgList2[i] = loadImg(self.imgPath[mode][idx[i,1]])
+            clsList1[i] = self.clsIndex[mode][idx[i,0]]
+            clsList2[i] = self.clsIndex[mode][idx[i,1]]
+
+        return imgList1,imgList2,clsList1,clsList2
 
 #########################################################
 class FaceNet:
     def __init__(self,isTraining,args):
         self.nBatch = args.nBatch
         self.learnRate = args.learnRate
-        self.pretrained_path = "inception_v4.ckpt"
+        self.pretrained_path = "./inception_v4.ckpt"
         self.zdim = args.zdim
         self.isTraining = isTraining
         self.imageSize = args.imageSize
         self.saveFolder = args.saveFolder
         self.reload = args.reload
         self.alpha = args.alpha
-        self.imgSize = [224,224,3]
+        self.imgSize = args.imageSize
         self.doFineTune = args.doFineTune
+        self.nOneTry = args.nOneTry
         self.buildModel()
 
         return
@@ -109,8 +201,6 @@ class FaceNet:
         # Slim
         with slim.arg_scope(inception_v4.inception_v4_arg_scope()):
             _,end_points = inception_v4.inception_v4(h,is_training=isTraining,reuse=reuse,create_aux_logits=False)
-        #with slim.arg_scope(inception_resnet_v2.inception_resnet_v2_arg_scope()):
-        #    _,end_points = inception_resnet_v2.inception_resnet_v2(h,is_training=isTraining,reuse=reuse)
         h = end_points["Mixed_5b"]
         if not reuse:
             self.variables_to_restore_bbNet = slim.get_variables_to_restore()
@@ -126,11 +216,15 @@ class FaceNet:
             n_b, n_h, n_w, n_f = self.getShape(h)
             assert n_h==n_w==1, "invalid shape after avg pool:(%d,%d)"%(n_h,n_w)
             h = tf.reshape(h,[n_b,n_f])
-            self.fc1_w, self.fc1_b = self._fc_variable([n_f,128],name="fc1")
+            self.fc1_w, self.fc1_b = self._fc_variable([n_f,self.zdim],name="fc1")
             h = tf.matmul(h, self.fc1_w) + self.fc1_b
 
             # L2 normalization
             h = h / tf.norm(h,axis=1,keep_dims=True)
+
+        tf.summary.histogram("fc1_w"   ,self.fc1_w)
+        tf.summary.histogram("fc1_b"   ,self.fc1_b)
+
 
         return h
 
@@ -157,9 +251,12 @@ class FaceNet:
             varList = [x for x in tf.trainable_variables() if "NN" in x.name]
         self.optimizer = tf.train.AdamOptimizer(self.learnRate).minimize(self.loss, var_list=varList)
 
+        tf.summary.scalar("loss" ,self.loss )
+
         #############################
         # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.90))
+        #config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.95))
+        config = tf.ConfigProto()
         self.sess = tf.Session(config=config)
         #############################
         ### saver
@@ -168,25 +265,23 @@ class FaceNet:
         if self.saveFolder:
             if not os.path.exists(self.saveFolder):
                 os.makedirs(self.saveFolder)
-                self.writer = tf.summary.FileWriter(self.saveFolder, self.sess.graph)
-                #self.writer_train = tf.summary.FileWriter(os.path.join(self.saveFolder,"train"), self.sess.graph)
-                #self.writer_test  = tf.summary.FileWriter(os.path.join(self.saveFolder,"test"))
+            self.writer = tf.summary.FileWriter(self.saveFolder, self.sess.graph)
         return
 
     def loadModel(self, model_path=None, pretrained_path=None):
         if model_path:
+            print "restoring model..."
             self.saver.restore(self.sess, model_path)
+            print "done"
         else:
             # model_pathが設定されて居ない場合でも、pre-trainedなモデルだけは読み込む
+            print "loading pretrained model..."
             self.saver_pretrained = tf.train.Saver(self.variables_to_restore_bbNet)
             self.saver_pretrained.restore(self.sess, pretrained_path)
+            print "done"
 
 
-    def train(self):
-        # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.45))
-        self.sess = tf.Session(config=config)
-
+    def train(self,bGen):
         self.loadModel(self.reload,self.pretrained_path)
 
         initOP = tf.global_variables_initializer()
@@ -196,30 +291,35 @@ class FaceNet:
         while True:
             epoch += 1
 
-            x = np.zeros([self.nBatch,224,224,3],np.float32)
-            t = np.zeros([self.nBatch]          ,np.int32)
+            x1,x2,t1,t2 = bGen.getBatch(self.nBatch,alpha=self.alpha,mode="train",nOneTry=self.nOneTry)
 
             # update generator
-            _,loss = self.sess.run([self.optimizer,self.loss],feed_dict={self.x1:x, self.x2:x, self.t1:t, self.t2:t})
+            _,loss,y1,y2,summary = self.sess.run([self.optimizer,self.loss,self.y1,self.y2,self.summary],feed_dict={self.x1:x1, self.x2:x2, self.t1:t1, self.t2:t2})
+            bGen.setVec(y1,y2)
             print loss
-            continue
+            if epoch%100==0:
+                self.writer.add_summary(summary,epoch)
+            if epoch%100==0:
+                print "%4d: loss=%.2e"%(epoch,loss)
             if epoch%1000==0:
-                print "%4d: loss(discri)=%.2e, loss(gener)=%.2e, accuracy(discri)=%.1f%%, accuracy(gener)=%.1f%%"%(epoch,d_loss,g_loss,d_accuracy*100., g_accuracy*100.)
-                g_image = self.sess.run(self.y_sample,feed_dict={self.z:np.random.uniform(-1,+1,[self.nBatch,self.zdim]).astype(np.float32)})
-                cv2.imwrite("log/img_%d.png"%epoch,g_image[0]*255.)
-                #cv2.imwrite("log/img_%d.png"%epoch,batch_images[0]*255.)
+                self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),epoch)
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--nBatch","-b",dest="nBatch",type=int,default=16)
-    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-3)
-    parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="models")
+    parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-4)
+    parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="autosave")
     parser.add_argument("--reload","-l",dest="reload",type=str,default=None)
     parser.add_argument("--DBpath","-d",dest="DBpath",type=str,default="/home/ysasaki/data/Yasukawa/_Engine2_2017.05.25.db")
     parser.add_argument("--NNmode","-m",dest="NNmode",type=str,choices=["actor","critic","distal","Qcritic"],default="distal")
-    parser.add_argument("--zdim","-z",dest="zdim",type=int,default=128)
+    parser.add_argument("--zdim","-z",dest="zdim",type=int,default=10)
+    parser.add_argument("--nOneTry","-n",dest="nOneTry",type=int,default=10)
     parser.add_argument("--alpha","-a",dest="alpha",type=float,default=0.2)
     parser.add_argument("--doFineTune","-f",dest="doFineTune",type=bool,default=False)
     args = parser.parse_args()
-    args.imageSize = [224,224,3]
+    args.imageSize = [112,112,3]
+
+    bGen = BatchGenerator(zdim=args.zdim,imageShape=args.imageSize)
+    bGen.loadAndSaveDir("/media/ysasaki/ForShare/data/lfw_funneled",outFile="class.csv",trainFrac=0.9)
     net = FaceNet(isTraining=True,args=args)
-    net.train()
+    net.train(bGen)
