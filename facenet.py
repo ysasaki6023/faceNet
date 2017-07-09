@@ -200,7 +200,7 @@ class FaceNet:
             t = np.zeros([self.nBatch]          ,np.int32)
 
             # update generator
-            loss = self.sess.run([self.optimizer,self.loss],feed_dict={self.x1:x, self.x2:x, self.t1:t, self.t2:t})
+            _,loss = self.sess.run([self.optimizer,self.loss],feed_dict={self.x1:x, self.x2:x, self.t1:t, self.t2:t})
             print loss
             continue
             if epoch%1000==0:
