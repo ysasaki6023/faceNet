@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os,sys,shutil,argparse,cv2,glob,csv,random
+from collections import deque
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
@@ -84,10 +85,12 @@ class BatchGenerator:
             x1 = np.repeat(x1,nOneTry,axis=0)
             x2 = np.tile  (x2,(nOneTry,1))
             dist = np.linalg.norm(x1-x2,axis=1)
-            good = np.where(dist<alpha)
+            good = np.where(dist<alpha)[0]
             i1 = np.divide(good,nOneTry)
             i2 = good - i1*nOneTry
-            return idx1[i1][0],idx2[i2][0]
+            if good.shape[0]==0: return idx1[0:1],idx2[0:1]
+            myRand = np.random.randint(0,good.shape[0],good.shape[0])
+            return idx1[i1][myRand],idx2[i2][myRand]
 
         # 最低nBatch個の組を作成 
         self.prevIndex = idx = np.zeros([nBatch,2],np.int32)
@@ -95,7 +98,6 @@ class BatchGenerator:
         cnt = 0
         while True:
             idList1,idList2 = oneTry()
-            #for k in range(res[0].shape[0]):
             for id1,id2 in zip(idList1,idList2):
                 idx[cnt,0] = id1
                 idx[cnt,1] = id2
@@ -194,7 +196,6 @@ class FaceNet:
     def getShape(self,h):
         return [int(x) for x in h.get_shape()]
 
-
     def buildNN(self,x,reuse=False,isTraining=True):
         h = x
 
@@ -222,9 +223,9 @@ class FaceNet:
             # L2 normalization
             h = h / tf.norm(h,axis=1,keep_dims=True)
 
-        tf.summary.histogram("fc1_w"   ,self.fc1_w)
-        tf.summary.histogram("fc1_b"   ,self.fc1_b)
-
+        if not reuse:
+            tf.summary.histogram("fc1_w"   ,self.fc1_w)
+            tf.summary.histogram("fc1_b"   ,self.fc1_b)
 
         return h
 
@@ -238,12 +239,21 @@ class FaceNet:
         self.y2 = self.buildNN(self.x2,reuse=True)
 
         # define loss
-        isSameClass = tf.cast(tf.equal(self.t1,self.t2),tf.float32)
+        isSameClassBool = tf.equal(self.t1,self.t2)
+        isSameClass     = tf.cast(isSameClassBool,tf.float32)
+        self.sameFrac   = tf.reduce_mean(isSameClass)
+        #self.minNorm = tf.reduce_min(tf.concat([tf.norm(self.y1,axis=1),tf.norm(self.y2,axis=1)]))
         distance = tf.norm(self.y1-self.y2,axis=1)
         self.L_pos = distance
         self.L_neg = tf.maximum(self.alpha - distance,0) # if the condition is satisfied, then neglect
         self.lossElement = isSameClass * self.L_pos + (1.-isSameClass) * self.L_neg
         self.loss  = tf.reduce_mean(self.lossElement)
+
+        #self.count = tf.where(isSameClassBool, tf.less(distance,self.alpha))
+        self.count_TT = tf.reduce_sum(tf.cast(tf.logical_and(               isSameClassBool,                tf.less(distance,self.alpha) ),tf.int32))
+        self.count_TF = tf.reduce_sum(tf.cast(tf.logical_and(               isSameClassBool ,tf.logical_not(tf.less(distance,self.alpha))),tf.int32))
+        self.count_FT = tf.reduce_sum(tf.cast(tf.logical_and(tf.logical_not(isSameClassBool),               tf.less(distance,self.alpha) ),tf.int32))
+        self.count_FF = tf.reduce_sum(tf.cast(tf.logical_and(tf.logical_not(isSameClassBool),tf.logical_not(tf.less(distance,self.alpha))),tf.int32))
 
         # define optimizer
         varList = None
@@ -260,7 +270,7 @@ class FaceNet:
         self.sess = tf.Session(config=config)
         #############################
         ### saver
-        self.saver = tf.train.Saver(max_to_keep=None)
+        self.saver = tf.train.Saver(max_to_keep=5)
         self.summary = tf.summary.merge_all()
         if self.saveFolder:
             if not os.path.exists(self.saveFolder):
@@ -288,30 +298,33 @@ class FaceNet:
         self.sess.run(initOP)
 
         epoch = -1
+        count_TT, count_TF, count_FT, count_FF = deque(maxlen=1000), deque(maxlen=1000), deque(maxlen=1000), deque(maxlen=1000)
         while True:
             epoch += 1
 
             x1,x2,t1,t2 = bGen.getBatch(self.nBatch,alpha=self.alpha,mode="train",nOneTry=self.nOneTry)
 
             # update generator
-            _,loss,y1,y2,summary = self.sess.run([self.optimizer,self.loss,self.y1,self.y2,self.summary],feed_dict={self.x1:x1, self.x2:x2, self.t1:t1, self.t2:t2})
+            _,loss,sameFrac,y1,y2,summary,c_TT,c_TF,c_FT,c_FF = self.sess.run([self.optimizer,self.loss,self.sameFrac,self.y1,self.y2,self.summary,
+                                                                               self.count_TT,self.count_TF,self.count_FT,self.count_FF],
+                                                                               feed_dict={self.x1:x1, self.x2:x2, self.t1:t1, self.t2:t2})
+            count_TT.append(c_TT),count_TF.append(c_TF),count_FT.append(c_FT),count_FF.append(c_FF)
+            tot = float(sum(count_TT) + sum(count_TF) + sum(count_FT) + sum(count_FF))
+            f_TT, f_TF, f_FT, f_FF = sum(count_TT)/tot, sum(count_TF)/tot, sum(count_FT)/tot, sum(count_FF)/tot
             bGen.setVec(y1,y2)
-            print loss
             if epoch%100==0:
                 self.writer.add_summary(summary,epoch)
             if epoch%100==0:
-                print "%4d: loss=%.2e"%(epoch,loss)
-            if epoch%1000==0:
+                print "%6d: loss=%.2e, sameFrac=%4.1f%%, count = [[%.2f,%.2f],[%.2f,%.2f]]"%(epoch,loss,sameFrac*100.,f_TT,f_TF,f_FT,f_FF)
+            if epoch%100000==0:
                 self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),epoch)
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--nBatch","-b",dest="nBatch",type=int,default=16)
+    parser.add_argument("--nBatch","-b",dest="nBatch",type=int,default=32)
     parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-4)
     parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="autosave")
     parser.add_argument("--reload","-l",dest="reload",type=str,default=None)
-    parser.add_argument("--DBpath","-d",dest="DBpath",type=str,default="/home/ysasaki/data/Yasukawa/_Engine2_2017.05.25.db")
-    parser.add_argument("--NNmode","-m",dest="NNmode",type=str,choices=["actor","critic","distal","Qcritic"],default="distal")
     parser.add_argument("--zdim","-z",dest="zdim",type=int,default=10)
     parser.add_argument("--nOneTry","-n",dest="nOneTry",type=int,default=10)
     parser.add_argument("--alpha","-a",dest="alpha",type=float,default=0.2)
