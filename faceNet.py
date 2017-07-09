@@ -321,7 +321,7 @@ class FaceNet:
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--nBatch","-b",dest="nBatch",type=int,default=32)
+    parser.add_argument("--nBatch","-b",dest="nBatch",type=int,default=128)
     parser.add_argument("--learnRate","-r",dest="learnRate",type=float,default=1e-4)
     parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="autosave")
     parser.add_argument("--reload","-l",dest="reload",type=str,default=None)
@@ -330,7 +330,7 @@ if __name__=="__main__":
     parser.add_argument("--alpha","-a",dest="alpha",type=float,default=0.2)
     parser.add_argument("--doFineTune","-f",dest="doFineTune",type=bool,default=False)
     args = parser.parse_args()
-    args.imageSize = [112,112,3]
+    args.imageSize = [120,120,3]
 
     bGen = BatchGenerator(zdim=args.zdim,imageShape=args.imageSize)
     bGen.loadAndSaveDir("/media/ysasaki/ForShare/data/lfw_funneled",outFile="class.csv",trainFrac=0.9)
