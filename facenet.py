@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 import inception_v4
+#import inception_resnet_v2
 
 #########################################################
 class BatchGenerator:
@@ -36,7 +37,7 @@ class FaceNet:
     def __init__(self,isTraining,args):
         self.nBatch = args.nBatch
         self.learnRate = args.learnRate
-        self.pretrainedModelPath = "inception_v4.ckpt"
+        self.pretrained_path = "inception_v4.ckpt"
         self.zdim = args.zdim
         self.isTraining = isTraining
         self.imageSize = args.imageSize
@@ -44,6 +45,7 @@ class FaceNet:
         self.reload = args.reload
         self.alpha = args.alpha
         self.imgSize = [224,224,3]
+        self.doFineTune = args.doFineTune
         self.buildModel()
 
         return
@@ -105,7 +107,10 @@ class FaceNet:
         h = x
 
         # Slim
-        _,end_points = inception_v4.inception_v4(h,is_training=isTraining,reuse=reuse)
+        with slim.arg_scope(inception_v4.inception_v4_arg_scope()):
+            _,end_points = inception_v4.inception_v4(h,is_training=isTraining,reuse=reuse,create_aux_logits=False)
+        #with slim.arg_scope(inception_resnet_v2.inception_resnet_v2_arg_scope()):
+        #    _,end_points = inception_resnet_v2.inception_resnet_v2(h,is_training=isTraining,reuse=reuse)
         h = end_points["Mixed_5b"]
         if not reuse:
             self.variables_to_restore_bbNet = slim.get_variables_to_restore()
@@ -139,11 +144,11 @@ class FaceNet:
         self.y2 = self.buildNN(self.x2,reuse=True)
 
         # define loss
-        isSameClass = tf.cast(tf.equal(self.t1,self.t2),tf.int32)
+        isSameClass = tf.cast(tf.equal(self.t1,self.t2),tf.float32)
         distance = tf.norm(self.y1-self.y2,axis=1)
         self.L_pos = distance
         self.L_neg = tf.maximum(self.alpha - distance,0) # if the condition is satisfied, then neglect
-        self.lossElement = isSameClass * self.L_pos + (1-isSameClass) * self.L_neg
+        self.lossElement = isSameClass * self.L_pos + (1.-isSameClass) * self.L_neg
         self.loss  = tf.reduce_mean(self.lossElement)
 
         # define optimizer
@@ -168,37 +173,36 @@ class FaceNet:
                 #self.writer_test  = tf.summary.FileWriter(os.path.join(self.saveFolder,"test"))
         return
 
-    def loadModel(self, model_path=None, pre_trained_path=None):
+    def loadModel(self, model_path=None, pretrained_path=None):
         if model_path:
             self.saver.restore(self.sess, model_path)
         else:
             # model_pathが設定されて居ない場合でも、pre-trainedなモデルだけは読み込む
-            self.saver_pretrained = tf.train.Saver(self.variables_to_restore)
-            self.saver_pretrained.restore(self.sess, pre_trained_path)
+            self.saver_pretrained = tf.train.Saver(self.variables_to_restore_bbNet)
+            self.saver_pretrained.restore(self.sess, pretrained_path)
 
 
-    def train(self,f_batch):
+    def train(self):
         # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.15))
+        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.45))
         self.sess = tf.Session(config=config)
+
+        self.loadModel(self.reload,self.pretrained_path)
 
         initOP = tf.global_variables_initializer()
         self.sess.run(initOP)
 
         epoch = -1
-        d_loss, g_loss = 1., 1.
-        d_accuracy, g_accuracy = -1., -1.
         while True:
             epoch += 1
 
-            batch_images,_ = f_batch(self.nBatch)
-            batch_z        = np.random.uniform(-1,+1,[self.nBatch,self.zdim]).astype(np.float32)
+            x = np.zeros([self.nBatch,224,224,3],np.float32)
+            t = np.zeros([self.nBatch]          ,np.int32)
 
             # update generator
-            if d_loss > g_loss:
-                _,d_loss,d_accuracy = self.sess.run([self.d_optimizer,self.d_loss,self.d_accuracy],feed_dict={self.z:batch_z, self.y_real:batch_images})
-            else:
-                _,g_loss,g_accuracy = self.sess.run([self.g_optimizer,self.g_loss,self.g_accuracy],feed_dict={self.z:batch_z, self.y_real:batch_images})
+            loss = self.sess.run([self.optimizer,self.loss],feed_dict={self.x1:x, self.x2:x, self.t1:t, self.t2:t})
+            print loss
+            continue
             if epoch%1000==0:
                 print "%4d: loss(discri)=%.2e, loss(gener)=%.2e, accuracy(discri)=%.1f%%, accuracy(gener)=%.1f%%"%(epoch,d_loss,g_loss,d_accuracy*100., g_accuracy*100.)
                 g_image = self.sess.run(self.y_sample,feed_dict={self.z:np.random.uniform(-1,+1,[self.nBatch,self.zdim]).astype(np.float32)})
@@ -214,6 +218,7 @@ if __name__=="__main__":
     parser.add_argument("--NNmode","-m",dest="NNmode",type=str,choices=["actor","critic","distal","Qcritic"],default="distal")
     parser.add_argument("--zdim","-z",dest="zdim",type=int,default=128)
     parser.add_argument("--alpha","-a",dest="alpha",type=float,default=0.2)
+    parser.add_argument("--doFineTune","-f",dest="doFineTune",type=bool,default=False)
     args = parser.parse_args()
     args.imageSize = [224,224,3]
     net = FaceNet(isTraining=True,args=args)
