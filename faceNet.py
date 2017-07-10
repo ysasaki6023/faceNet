@@ -317,7 +317,7 @@ class FaceNet:
                 self.writer.add_summary(summary,epoch)
             if epoch%100==0:
                 print "%6d: loss=%.2e, sameFrac=%4.1f%%, count = [[%.2f,%.2f],[%.2f,%.2f]]"%(epoch,loss,sameFrac*100.,f_TT,f_TF,f_FT,f_FF)
-            if epoch%100000==0:
+            if epoch%10000==0:
                 self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),epoch)
 
 if __name__=="__main__":
