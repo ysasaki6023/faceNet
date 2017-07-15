@@ -299,8 +299,8 @@ class FaceNet:
 
         #############################
         # define session
-        #config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.95))
-        config = tf.ConfigProto()
+        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.35))
+        #config = tf.ConfigProto()
         self.sess = tf.Session(config=config)
         #############################
         ### saver
