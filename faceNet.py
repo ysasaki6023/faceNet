@@ -45,6 +45,8 @@ class BatchGenerator:
         return
 
     def loadAndSaveDir(self,path,outFile="class.csv",trainFrac=0.9):
+        if not os.path.exists(os.path.dirname(outFile)):
+            os.makedirs(os.path.dirname(outFile))
         self.data = {}
         count_keys = 0
         count_file = 0
