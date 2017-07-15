@@ -143,7 +143,7 @@ class BatchGenerator:
         def loadImg(url):
             img = cv2.imread(url)
             img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img,(self.imageShape[0],self.imageShape[1]),cv2.INTER_CUBIC)
+            img = cv2.resize(img,(self.imageShape[0],self.imageShape[1]),0,0,cv2.INTER_CUBIC)
             return img
 
         imgList1 = np.zeros([nBatch, self.imageShape[0], self.imageShape[1], self.imageShape[2]], dtype=np.float32)
@@ -392,7 +392,7 @@ if __name__=="__main__":
     args = parser.parse_args()
     args.imageSize = [120,120,3]
 
-    dataDir = "/media/ysasaki/ForShare/data/lfw_funneled"
+    dataDir = "data/lfw_funneled"
     bGen = BatchGenerator(zdim=args.zdim,imageShape=args.imageSize)
     if args.testMode:
         bGen.loadFromFile(dataDir,inFile=os.path.join(os.path.dirname(args.reload),"class.csv"))
