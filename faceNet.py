@@ -299,7 +299,7 @@ class FaceNet:
 
         #############################
         # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.35))
+        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.40))
         #config = tf.ConfigProto()
         self.sess = tf.Session(config=config)
         #############################
@@ -395,12 +395,13 @@ if __name__=="__main__":
     dataDir = "/media/ysasaki/ForShare/data/lfw_funneled"
     bGen = BatchGenerator(zdim=args.zdim,imageShape=args.imageSize)
     if args.testMode:
-        bGen.loadFromFile(dataDir,inFile=os.path.join(args.reload,"class.csv"))
+        bGen.loadFromFile(dataDir,inFile=os.path.join(os.path.dirname(args.reload),"class.csv"))
+        args.nBatch = 1
         net = FaceNet(isTraining=False,args=args)
         net.test()
     else:
         if args.reload:
-            bGen.loadFromFile(dataDir,inFile=os.path.join(args.reload,"class.csv"))
+            bGen.loadFromFile(dataDir,inFile=os.path.join(os.path.dirname(args.reload),"class.csv"))
         else:
             bGen.loadAndSaveDir(dataDir,outFile=os.path.join(args.saveFolder,"class.csv"),trainFrac=0.9)
         net = FaceNet(isTraining=True,args=args)
