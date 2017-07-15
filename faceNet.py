@@ -13,6 +13,41 @@ class BatchGenerator:
         self.imageShape = imageShape
         self.zdim = zdim
 
+    def loadFromFile(self,path,outFile="class.csv"):
+        self.keys = {}
+        self.keys["train"] = self.keys_train
+        self.keys["test"]  = self.keys_test
+
+        with open(outFile,"r") as ofile:
+            r = csv.reader(ofile)
+            for line in r:
+                print line
+                assert line[1] in ["train","test"]
+                self.keys[line[1]] = self.keys[0]
+
+        self.data = {}
+        count_keys = 0
+        count_file = 0
+        for f in glob.glob(os.path.join(path,"*/*.jpg")):
+            fullPath  = f
+            className = f.split("/")[-2]
+            if not className in self.data:
+                self.data[className] = []
+                count_keys += 1
+            self.data[className].append(fullPath)
+            count_file += 1
+
+        print "found %d files, %d unique classes"%(count_file, count_keys)
+
+        self.keys_train = self.keys["train"]
+        self.keys_test  = self.keys["test" ]
+
+        self.clsIndex,self.imgPath,self.tempVec = {},{},{}
+        self.clsIndex["train"], self.imgPath["train"], self.tempVec["train"] = self.makeArray(self.data,self.keys_train)
+        self.clsIndex["test"] , self.imgPath["test"] , self.tempVec["test"]  = self.makeArray(self.data,self.keys_test )
+
+        return
+
     def loadAndSaveDir(self,path,outFile="class.csv",trainFrac=0.9):
         self.data = {}
         count_keys = 0
@@ -43,28 +78,28 @@ class BatchGenerator:
         self.keys["train"] = self.keys_train
         self.keys["test"]  = self.keys_test
 
-        def makeArray(tgtDict):
-            clsIndex = []
-            imgPath  = []
-            cls_index = -1
-            mycount = 0
-            for cls in tgtDict:
-                cls_index += 1
-                for f in self.data[cls]:
-                    mycount += 1
-                    clsIndex.append(cls_index)
-                    imgPath.append (f)
-            clsIndex = np.array(clsIndex)
-            imgPath  = np.array(imgPath)
-            tempVec  = np.zeros([mycount,self.zdim],dtype=np.float32)
-
-            return clsIndex,imgPath,tempVec
-
         self.clsIndex,self.imgPath,self.tempVec = {},{},{}
-        self.clsIndex["train"], self.imgPath["train"], self.tempVec["train"] = makeArray(self.keys_train)
-        self.clsIndex["test"] , self.imgPath["test"] , self.tempVec["test"]  = makeArray(self.keys_test )
+        self.clsIndex["train"], self.imgPath["train"], self.tempVec["train"] = self.makeArray(self.data,self.keys_train)
+        self.clsIndex["test"] , self.imgPath["test"] , self.tempVec["test"]  = self.makeArray(self.data,self.keys_test )
 
         return
+
+    def makeArray(self,data,tgtDict):
+        clsIndex = []
+        imgPath  = []
+        cls_index = -1
+        mycount = 0
+        for cls in tgtDict:
+            cls_index += 1
+            for data[cls]:
+                mycount += 1
+                clsIndex.append(cls_index)
+                imgPath.append (f)
+        clsIndex = np.array(clsIndex)
+        imgPath  = np.array(imgPath)
+        tempVec  = np.zeros([mycount,self.zdim],dtype=np.float32)
+
+        return clsIndex,imgPath,tempVec
 
     def setVec(self,v1,v2):
         self.tempVec[self.prevMode][self.prevIndex[:,0]] = v1
@@ -320,6 +355,34 @@ class FaceNet:
             if epoch%10000==0:
                 self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),epoch)
 
+    def test(self):
+        self.loadModel(self.reload,self.pretrained_path)
+
+        initOP = tf.global_variables_initializer()
+        self.sess.run(initOP)
+
+        epoch = -1
+        count_TT, count_TF, count_FT, count_FF = deque(maxlen=1000), deque(maxlen=1000), deque(maxlen=1000), deque(maxlen=1000)
+        while True:
+            epoch += 1
+
+            x1,x2,t1,t2 = bGen.getBatch(self.nBatch,alpha=self.alpha,mode="train",nOneTry=self.nOneTry)
+
+            # update generator
+            _,loss,sameFrac,y1,y2,summary,c_TT,c_TF,c_FT,c_FF = self.sess.run([self.optimizer,self.loss,self.sameFrac,self.y1,self.y2,self.summary,
+                                                                               self.count_TT,self.count_TF,self.count_FT,self.count_FF],
+                                                                               feed_dict={self.x1:x1, self.x2:x2, self.t1:t1, self.t2:t2})
+            count_TT.append(c_TT),count_TF.append(c_TF),count_FT.append(c_FT),count_FF.append(c_FF)
+            tot = float(sum(count_TT) + sum(count_TF) + sum(count_FT) + sum(count_FF))
+            f_TT, f_TF, f_FT, f_FF = sum(count_TT)/tot, sum(count_TF)/tot, sum(count_FT)/tot, sum(count_FF)/tot
+            bGen.setVec(y1,y2)
+            if epoch%100==0:
+                self.writer.add_summary(summary,epoch)
+            if epoch%100==0:
+                print "%6d: loss=%.2e, sameFrac=%4.1f%%, count = [[%.2f,%.2f],[%.2f,%.2f]]"%(epoch,loss,sameFrac*100.,f_TT,f_TF,f_FT,f_FF)
+            if epoch%10000==0:
+                self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),epoch)
+
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--nBatch","-b",dest="nBatch",type=int,default=128)
@@ -329,11 +392,15 @@ if __name__=="__main__":
     parser.add_argument("--zdim","-z",dest="zdim",type=int,default=10)
     parser.add_argument("--nOneTry","-n",dest="nOneTry",type=int,default=10)
     parser.add_argument("--alpha","-a",dest="alpha",type=float,default=0.2)
-    parser.add_argument("--doFineTune","-f",dest="doFineTune",type=bool,default=False)
+    parser.add_argument("--doFineTune","-f",dest="doFineTune",action="store_true")
+    parser.add_argument("--testMode","-t",dest="doFineTune",action="store_true")
     args = parser.parse_args()
     args.imageSize = [120,120,3]
 
     bGen = BatchGenerator(zdim=args.zdim,imageShape=args.imageSize)
     bGen.loadAndSaveDir("/media/ysasaki/ForShare/data/lfw_funneled",outFile="class.csv",trainFrac=0.9)
     net = FaceNet(isTraining=True,args=args)
-    net.train(bGen)
+    if args.testMode:
+        net.test(bGen)
+    else:
+        net.train(bGen)
