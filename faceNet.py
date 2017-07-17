@@ -2,6 +2,7 @@
 import os,sys,shutil,argparse,cv2,glob,csv,random
 from collections import deque
 import numpy as np
+import scipy as sp
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 import inception_v4
@@ -104,6 +105,12 @@ class BatchGenerator:
         self.tempVec[self.prevMode][self.prevIndex[:,1]] = v2
         return
 
+    def loadImg(self,url):
+        img = cv2.imread(url)
+        img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+        img = cv2.resize(img,(self.imageShape[0],self.imageShape[1]),0,0,cv2.INTER_CUBIC)
+        return img
+
     def getBatch(self,nBatch,alpha,mode="train",nOneTry=20):
         def oneTry():
             idx1 = np.random.randint(0,self.tempVec[mode].shape[0]-1,nOneTry)
@@ -140,23 +147,22 @@ class BatchGenerator:
 
         # nBatch個に対し、ファイルの読み込みを実施
         # ToDo: LFWデータセットは縦横同じ長さなので問題ないが、今後他のデータセットへ拡張する際は、縦横比を崩さないよう工夫をすること
-        def loadImg(url):
-            img = cv2.imread(url)
-            img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img,(self.imageShape[0],self.imageShape[1]),0,0,cv2.INTER_CUBIC)
-            return img
 
+        pthList1 = []
+        pthList2 = []
         imgList1 = np.zeros([nBatch, self.imageShape[0], self.imageShape[1], self.imageShape[2]], dtype=np.float32)
         imgList2 = np.zeros([nBatch, self.imageShape[0], self.imageShape[1], self.imageShape[2]], dtype=np.float32)
         clsList1 = np.zeros([nBatch], dtype=np.int32)
         clsList2 = np.zeros([nBatch], dtype=np.int32)
         for i in range(nBatch):
-            imgList1[i] = loadImg(self.imgPath[mode][idx[i,0]])
-            imgList2[i] = loadImg(self.imgPath[mode][idx[i,1]])
+            pthList1.append(self.imgPath[mode][idx[i,0]])
+            pthList2.append(self.imgPath[mode][idx[i,1]])
+            imgList1[i] = self.loadImg(self.imgPath[mode][idx[i,0]])
+            imgList2[i] = self.loadImg(self.imgPath[mode][idx[i,1]])
             clsList1[i] = self.clsIndex[mode][idx[i,0]]
             clsList2[i] = self.clsIndex[mode][idx[i,1]]
 
-        return imgList1,imgList2,clsList1,clsList2
+        return imgList1,imgList2,clsList1,clsList2,pthList1,pthList2
 
 #########################################################
 class FaceNet:
@@ -335,7 +341,7 @@ class FaceNet:
         while True:
             epoch += 1
 
-            x1,x2,t1,t2 = bGen.getBatch(self.nBatch,alpha=self.alpha,mode="train",nOneTry=self.nOneTry)
+            x1,x2,t1,t2,_,_ = bGen.getBatch(self.nBatch,alpha=self.alpha,mode="train",nOneTry=self.nOneTry)
 
             # update generator
             _,loss,sameFrac,y1,y2,summary,c_TT,c_TF,c_FT,c_FF = self.sess.run([self.optimizer,self.loss,self.sameFrac,self.y1,self.y2,self.summary,
@@ -352,30 +358,56 @@ class FaceNet:
             if epoch%10000==0:
                 self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),epoch)
 
-    def test(self):
+    def test(self,outputFile):
+        nMaxPerClass = 5
         self.loadModel(self.reload,self.pretrained_path)
-
         initOP = tf.global_variables_initializer()
         self.sess.run(initOP)
 
-        epoch = -1
-        count_TT, count_TF, count_FT, count_FF = deque(maxlen=1000), deque(maxlen=1000), deque(maxlen=1000), deque(maxlen=1000)
-        while True:
-            epoch += 1
+        ofile = open(outputFile,"w")
+        cfile = csv.writer(ofile,lineterminator="\n")
 
-            x1,x2,t1,t2 = bGen.getBatch(self.nBatch,alpha=self.alpha,mode="test",nOneTry=self.nOneTry)
+        bGenKeys = bGen.keys["train"]
 
-            # update generator
-            loss,sameFrac,y1,y2,summary,c_TT,c_TF,c_FT,c_FF = self.sess.run([self.loss,self.sameFrac,self.y1,self.y2,self.summary,
-                                                                             self.count_TT,self.count_TF,self.count_FT,self.count_FF],
-                                                                             feed_dict={self.x1:x1, self.x2:x2, self.t1:t1, self.t2:t2})
-            count_TT.append(c_TT),count_TF.append(c_TF),count_FT.append(c_FT),count_FF.append(c_FF)
-            tot = float(sum(count_TT) + sum(count_TF) + sum(count_FT) + sum(count_FF))
-            f_TT, f_TF, f_FT, f_FF = sum(count_TT)/tot, sum(count_TF)/tot, sum(count_FT)/tot, sum(count_FF)/tot
-            print np.linalg.norm(y1-y2,axis=1)
-            bGen.setVec(y1,y2)
-            if epoch%100==0:
-                print "%6d: loss=%.2e, sameFrac=%4.1f%%, count = [[%.2f,%.2f],[%.2f,%.2f]]"%(epoch,loss,sameFrac*100.,f_TT,f_TF,f_FT,f_FF)
+        for i1 in bGenKeys:
+            equal = []
+            if len(bGen.data[i1])<=1: continue
+            pairs = []
+            while True:
+                k1,k2 = np.random.randint(0,len(bGen.data[i1])),np.random.randint(0,len(bGen.data[i1]))
+                if k1==k2: continue
+                if k1>k2:
+                    temp = k1
+                    k1=k2
+                    k2 = temp
+                kk = (k1,k2)
+                if kk in pairs: continue
+                pairs.append(kk)
+                equal.append(True)
+                if len(pairs)>=sp.misc.comb(len(bGen.data[i1]),2,exact=True): break
+                if len(pairs)>=nMaxPerClass: break
+            urlList = [(bGen.data[i1][k1],bGen.data[i1][k2]) for k1,k2 in pairs]
+            nSame   = len(urlList)
+
+            for _ in range(nSame):
+                i2 = random.choice(bGenKeys)
+                if i2==i1: continue
+                k1 = random.choice(bGen.data[i1])
+                k2 = random.choice(bGen.data[i2])
+                urlList.append((k1,k2))
+                equal.append(False)
+
+            for eq, url in zip(equal,urlList):
+                k1,k2 = url
+                x1,x2 = bGen.loadImg(k1),bGen.loadImg(k2)
+                x1,x2 = np.expand_dims(x1,axis=0),np.expand_dims(x2,axis=0)
+                y1,y2 = self.sess.run([self.y1,self.y2], feed_dict={self.x1:x1, self.x2:x2})
+                distance = np.linalg.norm(y1-y2,axis=1)
+                print eq,distance,k1,k2
+                cfile.writerow([eq,distance,k1[0],k2[0],y1[0],y2[0]])
+                ofile.flush()
+        ofile.close()
+
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
@@ -397,7 +429,7 @@ if __name__=="__main__":
         bGen.loadFromFile(dataDir,inFile=os.path.join(os.path.dirname(args.reload),"class.csv"))
         args.nBatch = 1
         net = FaceNet(isTraining=False,args=args)
-        net.test()
+        net.test(outputFile="test.csv")
     else:
         if args.reload:
             bGen.loadFromFile(dataDir,inFile=os.path.join(os.path.dirname(args.reload),"class.csv"))
