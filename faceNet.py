@@ -277,7 +277,6 @@ class FaceNet:
         self.sameFrac   = tf.reduce_mean(isSameClass)
         #self.minNorm = tf.reduce_min(tf.concat([tf.norm(self.y1,axis=1),tf.norm(self.y2,axis=1)]))
         distance = tf.norm(self.y1-self.y2,axis=1)
-        #self.L_pos = distance
         self.L_pos = tf.maximum(distance - self.alpha,0) # updated loss
         self.L_neg = tf.maximum(self.alpha - distance,0) # if the condition is satisfied, then neglect
         self.lossElement = isSameClass * self.L_pos + (1.-isSameClass) * self.L_neg
@@ -299,8 +298,8 @@ class FaceNet:
 
         #############################
         # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.40))
-        #config = tf.ConfigProto()
+        #config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.40))
+        config = tf.ConfigProto()
         self.sess = tf.Session(config=config)
         #############################
         ### saver
